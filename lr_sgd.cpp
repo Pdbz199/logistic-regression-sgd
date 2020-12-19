@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <map>
 #include <omp.h>
+#include <gperftools/profiler.h>
 
 using namespace std;
 
@@ -90,7 +91,85 @@ double classify(map<int,double>& features, map<int,double>& weights){
     return sigmoid(logit);
 }
 
+map<int, double> SGD(vector<map<int,double>> data, unsigned int maxit, double l1, double alpha, map<int, double> weights, mt19937 g, map<int, double> total_l1) {
+    unsigned int thread_count = 12;
+    vector<map<int, double>> sum(thread_count);
+    cout << "# stochastic gradient descent" << endl;
+
+    #pragma omp parallel private (weights, total_l1) num_threads (thread_count)
+    // for (auto iter = 0; iter < thread_count; iter++)
+    {
+        // unsigned int num_threads = omp_get_num_threads();
+        // cout << "Num threads: " << num_threads << endl;
+        // Implemented Stochastic gradient descent training with cumulative L1 penalty from https://www.aclweb.org/anthology/P09-1054.pdf
+        // Train(C) procedure
+        double u = 0.0;
+        // weights already set
+        double norm = 1.0; // convergence
+        // unsigned int n = 0;
+        vector<int> index(data.size());
+        iota(index.begin(), index.end(), 0);
+
+        // Entries in 'data' are feature vectors
+        // specifically, data[i] is a feature vector
+        // there is a weight for each feature
+
+        for (unsigned int k = 0; k <= maxit; k++) {
+            // if (norm > eps) break; // cannot break with parallel loop
+
+            // \eta = alpha, and it is non-changing
+            u += (l1 * alpha);
+            // save old weights before changing them
+            map<int,double> old_weights(weights);
+            // shuffle (randomize) vector index entries
+            // if(shuf)
+                shuffle(index.begin(), index.end(), g);
+
+            // UpdateWeights(j) procedure
+            // for each feature in feature vector index[i]
+            for (auto it = data[index[0]].begin(); it != data[index[0]].end(); it++) {
+                // since data doesn't start at 0, we ignore index 0
+                if (it->first != 0) {
+                    int label = data[index[0]][0];
+                    // give classification of current feature vector with current weights
+                    double predicted = classify(data[index[0]], weights);
+                    weights[it->first] = weights[it->first] + alpha * (label - predicted) * it->second;
+
+                    // ApplyPenalty(i) procedure
+                    double z = weights[it->first];
+                    if (weights[it->first] > 0.0) {
+                        weights[it->first] = max(0.0, (double) (weights[it->first] - (u + total_l1[it->first])));
+                    } else if(weights[it->first] < 0.0) {
+                        weights[it->first] = min(0.0, (double) (weights[it->first] + (u - total_l1[it->first])));
+                    }
+                    total_l1[it->first] += (weights[it->first] - z);
+                }
+            }
+            sum[omp_get_thread_num()] = weights;
+
+            norm = vecnorm(weights, old_weights);
+            if (k && k % 100 == 0) {
+                double l1n = l1norm(weights);
+                printf("# convergence: %1.4f l1-norm: %1.4e iterations: %i\n", norm, l1n, k);
+            }
+        }
+    }
+
+    map<int, double> aggregate = sum[0];
+    cout << "2: " << aggregate[1] << endl;
+    for (unsigned int i = 1; i < thread_count; i++) {
+        for (auto it = sum[i].begin(); it != sum[i].end(); it++)
+            aggregate[it->first] += it->second;
+    }
+    for (auto it = aggregate.begin(); it != aggregate.end(); it++)
+        aggregate[it->first] = it->second/thread_count;
+    cout << "2 again: " << aggregate[1] << endl;
+
+    return aggregate;
+}
+
 int main(int argc, const char* argv[]){
+    ProfilerStart("sgd.prof");
 
     // Learning rate
     double alpha = 0.001;
@@ -242,83 +321,10 @@ int main(int argc, const char* argv[]){
         cout << "# features:          " << weights.size() << endl;
 
         // SGD begins
-        unsigned int thread_count = 12;
-        vector<map<int, double>> sum(thread_count);
-        cout << "# stochastic gradient descent" << endl;
-        double start = omp_get_wtime();
-
-        #pragma omp parallel private (weights, total_l1) num_threads (thread_count)
-        // for (auto iter = 0; iter < thread_count; iter++)
-        {
-            // unsigned int num_threads = omp_get_num_threads();
-            // cout << "Num threads: " << num_threads << endl;
-            // Implemented Stochastic gradient descent training with cumulative L1 penalty from https://www.aclweb.org/anthology/P09-1054.pdf
-            // Train(C) procedure
-            double u = 0.0;
-            // weights already set
-            double norm = 1.0; // convergence
-            // unsigned int n = 0;
-            vector<int> index(data.size());
-            iota(index.begin(), index.end(), 0);
-
-            // Entries in 'data' are feature vectors
-            // specifically, data[i] is a feature vector
-            // there is a weight for each feature
-
-            for (unsigned int k = 0; k <= maxit; k++) {
-                // if (norm > eps) break; // cannot break with parallel loop
-
-                // \eta = alpha, and it is non-changing
-                u += (l1 * alpha);
-                // save old weights before changing them
-                map<int,double> old_weights(weights);
-                // shuffle (randomize) vector index entries
-                if(shuf) shuffle(index.begin(), index.end(), g);
-
-                // UpdateWeights(j) procedure
-                // for each feature in feature vector index[i]
-                for (auto it = data[index[0]].begin(); it != data[index[0]].end(); it++) {
-                    // since data doesn't start at 0, we ignore index 0
-                    if (it->first != 0) {
-                        int label = data[index[0]][0];
-                        // give classification of current feature vector with current weights
-                        double predicted = classify(data[index[0]], weights);
-                        weights[it->first] = weights[it->first] + alpha * (label - predicted) * it->second;
-
-                        // ApplyPenalty(i) procedure
-                        double z = weights[it->first];
-                        if (weights[it->first] > 0.0) {
-                            weights[it->first] = max(0.0, (double) (weights[it->first] - (u + total_l1[it->first])));
-                        } else if(weights[it->first] < 0.0) {
-                            weights[it->first] = min(0.0, (double) (weights[it->first] + (u - total_l1[it->first])));
-                        }
-                        total_l1[it->first] += (weights[it->first] - z);
-                    }
-                }
-                sum[omp_get_thread_num()] = weights;
-
-                norm = vecnorm(weights, old_weights);
-                if (k && k % 100 == 0) {
-                    double l1n = l1norm(weights);
-                    printf("# convergence: %1.4f l1-norm: %1.4e iterations: %i\n", norm, l1n, k);
-                }
-            }
-        }
-
-        map<int, double> aggregate = sum[0];
-        cout << "2: " << aggregate[1] << endl;
-        for (unsigned int i = 1; i < thread_count; i++) {
-            for (auto it = sum[i].begin(); it != sum[i].end(); it++)
-                aggregate[it->first] += it->second;
-        }
-        for (auto it = aggregate.begin(); it != aggregate.end(); it++)
-            aggregate[it->first] = it->second/thread_count;
-        cout << "2 again: " << aggregate[1] << endl;
-
-        weights = aggregate;
-
-        double end = omp_get_wtime();
-        cout << "# Total time for SGD: " << end - start << " seconds" << endl;
+        // double start = omp_get_wtime();
+        weights = SGD(data, maxit, l1, alpha, weights, g, total_l1);
+        // double end = omp_get_wtime();
+        // cout << "# Total time for SGD: " << end - start << " seconds" << endl;
 
         unsigned int sparsity = 0;
         for (auto it = weights.begin(); it != weights.end(); it++) {
@@ -402,6 +408,7 @@ int main(int argc, const char* argv[]){
         }    
     }
 
+    ProfilerStop();
     return(0);
 
 }
