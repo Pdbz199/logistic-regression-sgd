@@ -13,6 +13,7 @@
 #include <numeric>
 #include <algorithm>
 #include <map>
+#include <gperftools/profiler.h>
 
 using namespace std;
 
@@ -89,7 +90,55 @@ double classify(map<int,double>& features, map<int,double>& weights){
     return sigmoid(logit);
 }
 
+void SGD(vector<map<int,double>>& data, double& eps, map<int,double>& weights, mt19937& g, double& l1, double& alpha, map<int,double>& total_l1, unsigned int& maxit) {
+    double mu = 0.0;
+    double norm = 1.0;
+    unsigned int n = 0;
+    vector<int> index(data.size());
+    iota(index.begin(),index.end(),0);
+
+    cout << "# stochastic gradient descent" << endl;
+    while(norm > eps){
+
+        map<int,double> old_weights(weights);
+        // if(shuf)
+        shuffle(index.begin(),index.end(),g);
+
+        for (unsigned int i = 0; i < data.size(); i++){
+            mu += (l1*alpha);
+            int label = data[index[i]][0];
+            double predicted = classify(data[index[i]], weights);
+            for(auto it = data[index[i]].begin(); it != data[index[i]].end(); it++){
+                if(it->first != 0){
+                    weights[it->first] += alpha * (label - predicted) * it->second;
+                    if(l1){
+                        // Cumulative L1-regularization
+                        // Tsuruoka, Y., Tsujii, J., and Ananiadou, S., 2009
+                        // http://aclweb.org/anthology/P/P09/P09-1054.pdf
+                        double z = weights[it->first];
+                        if(weights[it->first] > 0.0){
+                            weights[it->first] = max(0.0,(double)(weights[it->first] - (mu + total_l1[it->first])));
+                        }else if(weights[it->first] < 0.0){
+                            weights[it->first] = min(0.0,(double)(weights[it->first] + (mu - total_l1[it->first])));
+                        }
+                        total_l1[it->first] += (weights[it->first] - z);
+                    }    
+                }
+            }
+        }
+        norm = vecnorm(weights,old_weights);
+        if(n && n % 100 == 0){       
+            double l1n = l1norm(weights);
+            printf("# convergence: %1.4f l1-norm: %1.4e iterations: %i\n",norm,l1n,n);     
+        }
+        if(++n > maxit){
+            break;
+        }               
+    }
+}
+
 int main(int argc, const char* argv[]){
+    ProfilerStart("old-sgd.prof");
 
     // Learning rate
     double alpha = 0.001;
@@ -240,49 +289,7 @@ int main(int argc, const char* argv[]){
         cout << "# training examples: " << data.size() << endl;
         cout << "# features:          " << weights.size() << endl;
 
-        double mu = 0.0;
-        double norm = 1.0;
-        unsigned int n = 0;
-        vector<int> index(data.size());
-        iota(index.begin(),index.end(),0);
-
-        cout << "# stochastic gradient descent" << endl;
-        while(norm > eps){
-
-            map<int,double> old_weights(weights);
-            if(shuf) shuffle(index.begin(),index.end(),g);
-
-            for (unsigned int i = 0; i < data.size(); i++){
-                mu += (l1*alpha);
-                int label = data[index[i]][0];
-                double predicted = classify(data[index[i]],weights);
-                for(auto it = data[index[i]].begin(); it != data[index[i]].end(); it++){
-                    if(it->first != 0){
-                        weights[it->first] += alpha * (label - predicted) * it->second;
-                        if(l1){
-                            // Cumulative L1-regularization
-                            // Tsuruoka, Y., Tsujii, J., and Ananiadou, S., 2009
-                            // http://aclweb.org/anthology/P/P09/P09-1054.pdf
-                            double z = weights[it->first];
-                            if(weights[it->first] > 0.0){
-                                weights[it->first] = max(0.0,(double)(weights[it->first] - (mu + total_l1[it->first])));
-                            }else if(weights[it->first] < 0.0){
-                                weights[it->first] = min(0.0,(double)(weights[it->first] + (mu - total_l1[it->first])));
-                            }
-                            total_l1[it->first] += (weights[it->first] - z);
-                        }    
-                    }
-                }
-            }
-            norm = vecnorm(weights,old_weights);
-            if(n && n % 100 == 0){       
-                double l1n = l1norm(weights);
-                printf("# convergence: %1.4f l1-norm: %1.4e iterations: %i\n",norm,l1n,n);     
-            }
-            if(++n > maxit){
-                break;
-            }               
-        }
+        SGD(data, eps, weights, g, l1, alpha, total_l1, maxit);
 
         unsigned int sparsity = 0;
         for(auto it = weights.begin(); it != weights.end(); it++){
@@ -366,6 +373,6 @@ int main(int argc, const char* argv[]){
         }    
     }
 
+    ProfilerStop();
     return(0);
-
 }
